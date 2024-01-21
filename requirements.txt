@@ -1,0 +1,8 @@
+numpy~=1.21.2
+streamlit~=0.87.0
+keras~=2.4.3
+tensorflow-cpu
+streamlit_webrtc
+streamlit_mic_recorder
+plotly.express
+librosa
