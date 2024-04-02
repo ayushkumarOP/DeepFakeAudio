@@ -8,7 +8,7 @@ from streamlit_mic_recorder import mic_recorder
 import os
 
 # Load the pre-trained model
-model = load_model('audio_classifier.h5')
+model = load_model('classifier.h5')
 
 SAMPLE_RATE = 16000
 DURATION = 5
