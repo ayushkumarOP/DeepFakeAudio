@@ -7,7 +7,7 @@ from keras.models import load_model
 from streamlit_mic_recorder import mic_recorder
 import os
 
-model = load_model('audio_classifier.h5')
+model = load_model('classifier.h5')
 
 SAMPLE_RATE = 16000
 DURATION = 5
