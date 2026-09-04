@@ -87,4 +87,5 @@ jobs:
             --memory 2Gi \
             --cpu 1 \
             --min-instances 0 \
-            --max-instances 2
+            --max-instances 2 \
+            --set-env-vars MODEL_GCS_URI=${{ secrets.MODEL_GCS_URI }}

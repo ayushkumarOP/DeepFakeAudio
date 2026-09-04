@@ -13,16 +13,50 @@ DURATION = 5
 N_MELS = 128
 MAX_TIME_STEPS = 109
 MODEL_PATH = os.environ.get("MODEL_PATH", "classifier.h5")
+MODEL_GCS_URI = os.environ.get("MODEL_GCS_URI", "")
 
 
 @st.cache_resource
 def load_model():
+    # If a GCS URI is provided, attempt to download the model into MODEL_PATH.
+    if MODEL_GCS_URI and not os.path.exists(MODEL_PATH):
+        try:
+            from google.cloud import storage
+
+            # Expecting a URI like gs://bucket/path/to/classifier.h5
+            if MODEL_GCS_URI.startswith("gs://"):
+                _, _, path = MODEL_GCS_URI.partition("gs://")
+                bucket_name, _, blob_name = path.partition("/")
+                client = storage.Client()
+                bucket = client.bucket(bucket_name)
+                blob = bucket.blob(blob_name)
+                blob.download_to_filename(MODEL_PATH)
+            else:
+                # Fallback: try HTTP(S) download
+                import requests
+
+                resp = requests.get(MODEL_GCS_URI, stream=True)
+                resp.raise_for_status()
+                with open(MODEL_PATH, "wb") as fh:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        fh.write(chunk)
+        except Exception as exc:  # pragma: no cover - best-effort download
+            raise RuntimeError(f"Failed to obtain model from '{MODEL_GCS_URI}': {exc}")
+
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(
             f"Model file not found at '{MODEL_PATH}'. "
-            "Add classifier.h5 to the container or set MODEL_PATH."
+            "Add classifier.h5 to the container, set MODEL_PATH, or set MODEL_GCS_URI."
         )
-    return keras.models.load_model(MODEL_PATH)
+
+    try:
+        return keras.models.load_model(MODEL_PATH)
+    except OSError as exc:
+        # Provide a clearer error when the file appears invalid/corrupt
+        raise OSError(
+            f"Unable to load model at '{MODEL_PATH}': {exc}. "
+            "If this file was downloaded from GCS, ensure the upload completed successfully and the file is a valid HDF5 model."
+        )
 
 
 def process_audio(audio_source):
