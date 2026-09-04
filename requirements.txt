@@ -1,8 +1,8 @@
-numpy
+numpy<2
 streamlit
 keras
-tensorflow-cpu
+tensorflow
 streamlit_webrtc
 streamlit_mic_recorder
-plotly.express
+plotly
 librosa
