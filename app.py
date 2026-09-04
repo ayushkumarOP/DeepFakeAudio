@@ -1,5 +1,6 @@
 import os
 import tempfile
+import logging
 
 import librosa
 import numpy as np
@@ -23,6 +24,9 @@ def load_model():
         try:
             from google.cloud import storage
 
+            import hashlib
+            import base64
+
             # Expecting a URI like gs://bucket/path/to/classifier.h5
             if MODEL_GCS_URI.startswith("gs://"):
                 _, _, path = MODEL_GCS_URI.partition("gs://")
@@ -31,6 +35,32 @@ def load_model():
                 bucket = client.bucket(bucket_name)
                 blob = bucket.blob(blob_name)
                 blob.download_to_filename(MODEL_PATH)
+
+                # Integrity checks: log size, header bytes, and compare MD5
+                try:
+                    blob_md5 = blob.md5_hash  # base64-encoded MD5 from GCS
+                except Exception:
+                    blob_md5 = None
+
+                local_size = os.path.getsize(MODEL_PATH)
+                with open(MODEL_PATH, "rb") as fh:
+                    header = fh.read(8)
+                    fh.seek(0)
+                    local_md5 = base64.b64encode(hashlib.md5(fh.read()).digest()).decode()
+
+                logging.info(
+                    "Model downloaded: path=%s size=%d header=%s gcs_md5=%s local_md5=%s",
+                    MODEL_PATH,
+                    local_size,
+                    header.hex(),
+                    blob_md5,
+                    local_md5,
+                )
+
+                if blob_md5 and local_md5 != blob_md5:
+                    raise RuntimeError(
+                        f"Downloaded model MD5 mismatch (gcs={blob_md5} != local={local_md5})"
+                    )
             else:
                 # Fallback: try HTTP(S) download
                 import requests
@@ -40,6 +70,25 @@ def load_model():
                 with open(MODEL_PATH, "wb") as fh:
                     for chunk in resp.iter_content(chunk_size=8192):
                         fh.write(chunk)
+
+                # For HTTP(S) sources compute local md5 and header
+                try:
+                    import hashlib, base64
+
+                    local_size = os.path.getsize(MODEL_PATH)
+                    with open(MODEL_PATH, "rb") as fh:
+                        header = fh.read(8)
+                        fh.seek(0)
+                        local_md5 = base64.b64encode(hashlib.md5(fh.read()).digest()).decode()
+                    logging.info(
+                        "Model downloaded via HTTP: path=%s size=%d header=%s local_md5=%s",
+                        MODEL_PATH,
+                        local_size,
+                        header.hex(),
+                        local_md5,
+                    )
+                except Exception:
+                    pass
         except Exception as exc:  # pragma: no cover - best-effort download
             raise RuntimeError(f"Failed to obtain model from '{MODEL_GCS_URI}': {exc}")
 
