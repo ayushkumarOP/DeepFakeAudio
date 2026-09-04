@@ -2,7 +2,8 @@ name: Deploy DeepFakeAudio (Dev)
 
 on:
   push:
-    branches: [main]
+    branches-ignore:
+      - main
   workflow_dispatch:
 
 permissions:
