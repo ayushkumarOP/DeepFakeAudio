@@ -1,8 +1,17 @@
 import os
 import tempfile
 import logging
+import sys
+
+# Ensure INFO+ logs are emitted to stderr so Cloud Run captures them
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[logging.StreamHandler(sys.stderr)],
+)
 
 import librosa
+import threading
 import numpy as np
 import plotly.express as px
 import streamlit as st
@@ -200,25 +209,44 @@ def process_audio(audio_source):
 
 
 def main():
-    try:
-        load_model()
-    except Exception as exc:
-        st.error(f"Unable to load the model. Error: {exc}")
-        return
+    # Warm the model in background to avoid blocking the frontend on cold start
+    if "model_warming_started" not in st.session_state:
+        st.session_state.model_warming_started = True
+        st.session_state.model_ready = False
+        st.session_state.model_error = ""
+
+        def _warm():
+            try:
+                load_model()
+                st.session_state.model_ready = True
+            except Exception as e:  # pragma: no cover - runtime
+                st.session_state.model_error = str(e)
+
+        threading.Thread(target=_warm, daemon=True).start()
+
+    if st.session_state.get("model_error"):
+        st.error(f"Unable to load the model. Error: {st.session_state.get('model_error')}")
+        # allow UI to remain visible so user can see instructions
 
     st.title("Deep:blue[Fake] Audio Classifier :sparkles:")
     st.subheader("", divider="rainbow")
 
     st.subheader("Record the voice for DeepFake:")
+    if not st.session_state.get("model_ready"):
+        with st.container():
+            st.info("Model is warming up — predictions will be available shortly.")
     audio = mic_recorder(start_prompt="⏺️", stop_prompt="⏹️", key="recorder")
 
     if audio:
-        temp_file_path = "temp_audio.flac"
-        with open(temp_file_path, "wb") as temp_file:
-            temp_file.write(audio["bytes"])
+        if not st.session_state.get("model_ready"):
+            st.warning("Model is still loading — try again in a moment.")
+        else:
+            temp_file_path = "temp_audio.flac"
+            with open(temp_file_path, "wb") as temp_file:
+                temp_file.write(audio["bytes"])
 
-        prediction, audio_clip = process_audio(temp_file_path)
-        os.remove(temp_file_path)
+            prediction, audio_clip = process_audio(temp_file_path)
+            os.remove(temp_file_path)
 
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -251,7 +279,10 @@ def main():
     uploaded_file = st.file_uploader("", type=["flac"])
 
     if uploaded_file is not None:
-        prediction, audio_clip = process_audio(uploaded_file)
+        if not st.session_state.get("model_ready"):
+            st.warning("Model is still loading — try again in a moment.")
+        else:
+            prediction, audio_clip = process_audio(uploaded_file)
 
         col1, col2, col3 = st.columns(3)
         with col1:
