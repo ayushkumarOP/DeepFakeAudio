@@ -1,5 +1,6 @@
 import os
 import tempfile
+import logging
 
 import librosa
 import numpy as np
@@ -13,16 +14,148 @@ DURATION = 5
 N_MELS = 128
 MAX_TIME_STEPS = 109
 MODEL_PATH = os.environ.get("MODEL_PATH", "classifier.h5")
+MODEL_GCS_URI = os.environ.get("MODEL_GCS_URI", "")
 
 
 @st.cache_resource
 def load_model():
+    # If a GCS URI is provided, attempt to download the model into MODEL_PATH.
+    if MODEL_GCS_URI and not os.path.exists(MODEL_PATH):
+        try:
+            from google.cloud import storage
+
+            import hashlib
+            import base64
+
+            # Expecting a URI like gs://bucket/path/to/classifier.h5
+            if MODEL_GCS_URI.startswith("gs://"):
+                _, _, path = MODEL_GCS_URI.partition("gs://")
+                bucket_name, _, blob_name = path.partition("/")
+                client = storage.Client()
+                bucket = client.bucket(bucket_name)
+                blob = bucket.blob(blob_name)
+                blob.download_to_filename(MODEL_PATH)
+
+                # Integrity checks: log size, header bytes, and compare MD5
+                try:
+                    blob_md5 = blob.md5_hash  # base64-encoded MD5 from GCS
+                except Exception:
+                    blob_md5 = None
+
+                local_size = os.path.getsize(MODEL_PATH)
+                with open(MODEL_PATH, "rb") as fh:
+                    header = fh.read(8)
+                    fh.seek(0)
+                    local_md5 = base64.b64encode(hashlib.md5(fh.read()).digest()).decode()
+
+                logging.info(
+                    "Model downloaded: path=%s size=%d header=%s gcs_md5=%s local_md5=%s",
+                    MODEL_PATH,
+                    local_size,
+                    header.hex(),
+                    blob_md5,
+                    local_md5,
+                )
+
+                if blob_md5 and local_md5 != blob_md5:
+                    raise RuntimeError(
+                        f"Downloaded model MD5 mismatch (gcs={blob_md5} != local={local_md5})"
+                    )
+                
+            else:
+                # Fallback: try HTTP(S) download
+                import requests
+
+                resp = requests.get(MODEL_GCS_URI, stream=True)
+                resp.raise_for_status()
+                with open(MODEL_PATH, "wb") as fh:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        fh.write(chunk)
+
+                # For HTTP(S) sources compute local md5 and header
+                try:
+                    import hashlib, base64
+
+                    local_size = os.path.getsize(MODEL_PATH)
+                    with open(MODEL_PATH, "rb") as fh:
+                        header = fh.read(8)
+                        fh.seek(0)
+                        local_md5 = base64.b64encode(hashlib.md5(fh.read()).digest()).decode()
+                    logging.info(
+                        "Model downloaded via HTTP: path=%s size=%d header=%s local_md5=%s",
+                        MODEL_PATH,
+                        local_size,
+                        header.hex(),
+                        local_md5,
+                    )
+                except Exception:
+                    pass
+        except Exception as exc:  # pragma: no cover - best-effort download
+            raise RuntimeError(f"Failed to obtain model from '{MODEL_GCS_URI}': {exc}")
+
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(
             f"Model file not found at '{MODEL_PATH}'. "
-            "Add classifier.h5 to the container or set MODEL_PATH."
+            "Add classifier.h5 to the container, set MODEL_PATH, or set MODEL_GCS_URI."
         )
-    return keras.models.load_model(MODEL_PATH)
+
+    # Attempt to load the Keras model and provide rich diagnostics on failure
+    try:
+        logging.info("Loading model from %s", MODEL_PATH)
+        model = keras.models.load_model(MODEL_PATH)
+        logging.info("Model loaded successfully from %s", MODEL_PATH)
+        return model
+    except Exception as exc:  # pragma: no cover - runtime error diagnostics
+        logging.exception("Failed to load model at %s", MODEL_PATH)
+
+        # Gather file diagnostics to aid debugging
+        file_exists = os.path.exists(MODEL_PATH)
+        file_size = None
+        header_hex = None
+        local_md5 = None
+
+        if file_exists:
+            try:
+                file_size = os.path.getsize(MODEL_PATH)
+            except Exception:
+                logging.exception("Failed to stat model file %s", MODEL_PATH)
+
+            try:
+                with open(MODEL_PATH, "rb") as fh:
+                    header = fh.read(16)
+                    header_hex = header.hex()
+                    fh.seek(0)
+                    import hashlib, base64
+
+                    local_md5 = base64.b64encode(hashlib.md5(fh.read()).digest()).decode()
+            except Exception:
+                logging.exception("Failed to read model file %s", MODEL_PATH)
+
+        logging.error(
+            "Model load diagnostics: exists=%s size=%s header=%s md5=%s",
+            file_exists,
+            file_size,
+            header_hex,
+            local_md5,
+        )
+
+        # Try to open with h5py for a clearer HDF5-specific error when available
+        try:
+            import h5py
+
+            try:
+                with h5py.File(MODEL_PATH, "r") as hf:
+                    keys = list(hf.keys())
+                logging.info("h5py opened model file; top-level keys: %s", keys)
+            except Exception:
+                logging.exception("h5py failed to open model file %s", MODEL_PATH)
+        except Exception:
+            logging.info("h5py not available in runtime; skipping HDF5 open check")
+
+        raise RuntimeError(
+            f"Unable to load model at '{MODEL_PATH}': {exc}. "
+            "See instance logs for file diagnostics (exists/size/header/md5)."
+        ) from exc
 
 
 def process_audio(audio_source):
@@ -144,3 +277,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+#oo
