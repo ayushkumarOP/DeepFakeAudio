@@ -1,6 +1,7 @@
 import os
 import tempfile
 import logging
+import hashlib
 
 import librosa
 import numpy as np
@@ -15,10 +16,40 @@ N_MELS = 128
 MAX_TIME_STEPS = 109
 MODEL_PATH = os.environ.get("MODEL_PATH", "classifier.h5")
 MODEL_GCS_URI = os.environ.get("MODEL_GCS_URI", "")
+HF_MODEL_REPO_ID = os.environ.get("HF_MODEL_REPO_ID", "")
+HF_MODEL_FILENAME = os.environ.get("HF_MODEL_FILENAME", "classifier.h5")
+
+
+st.set_page_config(
+    page_title="DeepFake Audio Detector",
+    page_icon="🎙️",
+    layout="wide",
+)
 
 
 @st.cache_resource
 def load_model():
+    if HF_MODEL_REPO_ID and not os.path.exists(MODEL_PATH):
+        try:
+            from huggingface_hub import hf_hub_download
+
+            downloaded_model_path = hf_hub_download(
+                repo_id=HF_MODEL_REPO_ID,
+                filename=HF_MODEL_FILENAME,
+                token=os.environ.get("HF_TOKEN"),
+            )
+            logging.info(
+                "Model downloaded from Hugging Face: repo=%s filename=%s path=%s",
+                HF_MODEL_REPO_ID,
+                HF_MODEL_FILENAME,
+                downloaded_model_path,
+            )
+            return keras.models.load_model(downloaded_model_path)
+        except Exception as exc:  # pragma: no cover - deployment-time diagnostics
+            raise RuntimeError(
+                f"Failed to obtain model from Hugging Face repo '{HF_MODEL_REPO_ID}': {exc}"
+            ) from exc
+
     # If a GCS URI is provided, attempt to download the model into MODEL_PATH.
     if MODEL_GCS_URI and not os.path.exists(MODEL_PATH):
         try:
@@ -158,12 +189,17 @@ def load_model():
         ) from exc
 
 
-def process_audio(audio_source):
+def process_audio(audio_source, suffix=".flac"):
     temp_file_path = None
 
     try:
-        if hasattr(audio_source, "read"):
-            with tempfile.NamedTemporaryFile(suffix=".flac", delete=False) as temp_file:
+        if isinstance(audio_source, bytes):
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_file:
+                temp_file.write(audio_source)
+                temp_file_path = temp_file.name
+        elif hasattr(audio_source, "read"):
+            audio_source.seek(0)
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_file:
                 temp_file.write(audio_source.read())
                 temp_file_path = temp_file.name
         else:
@@ -199,6 +235,46 @@ def process_audio(audio_source):
                 pass
 
 
+def audio_fingerprint(audio_bytes):
+    return hashlib.sha256(audio_bytes).hexdigest()[:12]
+
+
+def format_prediction(prediction):
+    score = float(prediction[0][0])
+    label = "Fake" if prediction[0][0] == 1 else "Real"
+    return label, score
+
+
+def render_result(prediction, audio_clip, audio_source):
+    label, score = format_prediction(prediction)
+    status = "error" if label == "Fake" else "success"
+
+    result_col, audio_col = st.columns([0.95, 1.35], gap="large")
+
+    with result_col:
+        st.subheader("Result")
+        getattr(st, status)(f"Prediction: {label}")
+        st.metric("Model score", f"{score:.4f}")
+
+        st.warning(
+            "This detector should be treated as a decision-support signal, not final proof."
+        )
+
+    with audio_col:
+        st.subheader("Audio")
+        st.audio(audio_source)
+
+        fig = px.line(x=list(range(len(audio_clip))), y=audio_clip)
+        fig.update_layout(
+            title="Waveform",
+            xaxis_title="Sample",
+            yaxis_title="Amplitude",
+            height=320,
+            margin=dict(l=24, r=24, t=48, b=24),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+
 def main():
     try:
         load_model()
@@ -206,76 +282,37 @@ def main():
         st.error(f"Unable to load the model. Error: {exc}")
         return
 
-    st.title("Deep:blue[Fake] Audio Classifier :sparkles:")
-    st.subheader("", divider="rainbow")
+    st.title("DeepFake Audio Detector")
+    st.caption("Record or upload a short audio clip to classify it as real or fake.")
+    st.divider()
 
-    st.subheader("Record the voice for DeepFake:")
-    audio = mic_recorder(start_prompt="⏺️", stop_prompt="⏹️", key="recorder")
+    record_tab, upload_tab = st.tabs(["Record", "Upload"])
 
-    if audio:
-        temp_file_path = "temp_audio.flac"
-        with open(temp_file_path, "wb") as temp_file:
-            temp_file.write(audio["bytes"])
+    with record_tab:
+        st.subheader("Record Audio")
+        audio = mic_recorder(start_prompt="Record", stop_prompt="Stop", key="recorder")
 
-        prediction, audio_clip = process_audio(temp_file_path)
-        os.remove(temp_file_path)
+        if audio:
+            audio_bytes = audio["bytes"]
+            st.caption(f"Audio ID: {audio_fingerprint(audio_bytes)}")
+            prediction, audio_clip = process_audio(audio_bytes, suffix=".flac")
+            render_result(prediction, audio_clip, audio_bytes)
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.text(f"Prediction: {prediction[0][0]}")
-            if prediction[0][0] == 1:
-                st.write("Prediction: Fake")
-            else:
-                st.write("Prediction: Real")
+    with upload_tab:
+        st.subheader("Upload Audio")
+        uploaded_file = st.file_uploader(
+            "Choose an audio file",
+            type=["flac", "wav", "mp3"],
+            label_visibility="collapsed",
+        )
 
-        with col2:
-            st.info("Your uploaded audio is below")
-            st.audio(audio["bytes"])
-
-            fig = px.line(x=list(range(len(audio_clip))), y=audio_clip)
-            fig.update_layout(
-                title="Waveform plot",
-                xaxis_title="Time",
-                yaxis_title="Amplitude",
-            )
-            st.plotly_chart(fig)
-
-        with col3:
-            st.info("Disclaimer")
-            st.warning(
-                "These classification or detection mechanisms are not always accurate. "
-                "They should be considered as a strong signal and not the ultimate decision makers."
-            )
-
-    st.subheader("Upload your Call Recording:")
-    uploaded_file = st.file_uploader("", type=["flac"])
-
-    if uploaded_file is not None:
-        prediction, audio_clip = process_audio(uploaded_file)
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.header("Result")
-            if prediction[0][0] == 1:
-                st.write("Prediction: Fake")
-            else:
-                st.write("Prediction: Real")
-
-        with col2:
-            st.header("Audio file")
-            st.info("Your uploaded audio is below")
-            st.audio(uploaded_file)
-
-            fig = px.line(x=list(range(len(audio_clip))), y=audio_clip)
-            fig.update_layout(
-                title="Waveform plot",
-                xaxis_title="Time",
-                yaxis_title="Amplitude",
-            )
-            st.plotly_chart(fig)
+        if uploaded_file is not None:
+            uploaded_bytes = uploaded_file.getvalue()
+            suffix = os.path.splitext(uploaded_file.name)[1] or ".flac"
+            st.caption(f"Audio ID: {audio_fingerprint(uploaded_bytes)}")
+            prediction, audio_clip = process_audio(uploaded_bytes, suffix=suffix)
+            render_result(prediction, audio_clip, uploaded_bytes)
 
 
 if __name__ == "__main__":
     main()
-
-#oo
