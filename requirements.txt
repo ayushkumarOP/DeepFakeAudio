@@ -1,9 +1,8 @@
 numpy<2
 streamlit
-keras
-tensorflow
-streamlit_webrtc
+tensorflow==2.15.1
 streamlit_mic_recorder
 plotly
 librosa
 google-cloud-storage
+huggingface_hub

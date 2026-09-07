@@ -4,7 +4,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PORT=8080 \
     MODEL_PATH=/app/classifier.h5 \
-    MODEL_GCS_URI=""
+    MODEL_GCS_URI="" \
+    HF_MODEL_REPO_ID="" \
+    HF_MODEL_FILENAME=classifier.h5
 
 WORKDIR /app
 
